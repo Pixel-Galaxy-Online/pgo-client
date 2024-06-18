@@ -2,23 +2,47 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"log"
 	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
-	"image/color"
+)
+
+type Direction int
+
+const (
+	North Direction = iota
+	East
+	South
+	West
+)
+
+type AnimationType int
+
+const (
+	Idle AnimationType = iota
+	Walk
 )
 
 type Game struct {
-	playerImage *ebiten.Image
-	conn        *websocket.Conn
-	players     map[string]Player
-	clientID    string
-	mu          sync.Mutex // Mutex to protect shared resources
+	playerImages   map[Direction]map[AnimationType][]*ebiten.Image
+	conn           *websocket.Conn
+	players        map[string]Player
+	clientID       string
+	frameIndex     int
+	animationTick  int
+	animationSpeed int
+	mu             sync.Mutex // Mutex to protect shared assets
+	direction      Direction
+	isMoving       bool
 }
 
 type Player struct {
@@ -33,32 +57,87 @@ type Input struct {
 }
 
 func (g *Game) Update() error {
+	g.isMoving = false
+
 	if ebiten.IsKeyPressed(ebiten.KeyUp) {
 		g.conn.WriteJSON(Input{Type: "move_up", Amount: 2})
+		g.setDirection(North)
+		g.isMoving = true
 	}
 	if ebiten.IsKeyPressed(ebiten.KeyDown) {
 		g.conn.WriteJSON(Input{Type: "move_down", Amount: 2})
+		g.setDirection(South)
+		g.isMoving = true
 	}
 	if ebiten.IsKeyPressed(ebiten.KeyLeft) {
 		g.conn.WriteJSON(Input{Type: "move_left", Amount: 2})
+		g.setDirection(West)
+		g.isMoving = true
 	}
 	if ebiten.IsKeyPressed(ebiten.KeyRight) {
 		g.conn.WriteJSON(Input{Type: "move_right", Amount: 2})
+		g.setDirection(East)
+		g.isMoving = true
 	}
 
+	// Increment animation tick and update frame index based on animation speed
+	g.animationTick++
+	if g.animationTick >= g.animationSpeed {
+		g.animationTick = 0
+		g.updateFrameIndex()
+	}
+
+	return nil
+}
+
+func (g *Game) setDirection(direction Direction) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.direction != direction {
+		g.direction = direction
+		g.frameIndex = 0
+	}
+}
+
+func (g *Game) updateFrameIndex() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	animationType := Idle
+	if g.isMoving {
+		animationType = Walk
+	}
+	frameCount := len(g.playerImages[g.direction][animationType])
+	if frameCount > 0 {
+		g.frameIndex = (g.frameIndex + 1) % frameCount
+	}
+}
+
+func (g *Game) getCurrentFrame() *ebiten.Image {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	animationType := Idle
+	if g.isMoving {
+		animationType = Walk
+	}
+	frames := g.playerImages[g.direction][animationType]
+	if len(frames) > 0 {
+		return frames[g.frameIndex]
+	}
 	return nil
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
 	screen.Fill(color.RGBA{0, 0, 0, 255})
 
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	for _, player := range g.players {
-		op := &ebiten.DrawImageOptions{}
-		op.GeoM.Translate(player.X, player.Y)
-		screen.DrawImage(g.playerImage, op)
+	frame := g.getCurrentFrame()
+	if frame != nil {
+		g.mu.Lock()
+		for _, player := range g.players {
+			op := &ebiten.DrawImageOptions{}
+			op.GeoM.Translate(player.X, player.Y)
+			screen.DrawImage(frame, op)
+		}
+		g.mu.Unlock()
 	}
 
 	// Display coordinates in the top-left corner for the current client
@@ -111,6 +190,36 @@ func connectToServer(playerID string) (*websocket.Conn, error) {
 	return conn, nil
 }
 
+func loadFrames(dir string) ([]*ebiten.Image, error) {
+	var frames []*ebiten.Image
+
+	// Read all files in the directory
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	// Sort files to ensure they are in numerical order
+	var frameFiles []string
+	for _, file := range files {
+		if !file.IsDir() {
+			frameFiles = append(frameFiles, file.Name())
+		}
+	}
+	sort.Strings(frameFiles)
+
+	// Load each frame
+	for _, file := range frameFiles {
+		img, _, err := ebitenutil.NewImageFromFile(filepath.Join(dir, file))
+		if err != nil {
+			return nil, err
+		}
+		frames = append(frames, img)
+	}
+
+	return frames, nil
+}
+
 func main() {
 	playerID := "PLAYER_ID"
 
@@ -124,13 +233,36 @@ func main() {
 	log.Printf("Client ID: %s", clientID)
 
 	game := &Game{
-		conn:     conn,
-		players:  make(map[string]Player),
-		clientID: clientID,
+		conn:           conn,
+		players:        make(map[string]Player),
+		clientID:       clientID,
+		animationSpeed: 20, // Set animation speed (higher value means slower animation)
+		playerImages:   make(map[Direction]map[AnimationType][]*ebiten.Image),
 	}
-	game.playerImage, _, err = ebitenutil.NewImageFromFile("resources/sprite.png")
-	if err != nil {
-		log.Fatal(err)
+
+	// Load all frames for each direction and animation type
+	directions := map[Direction]string{
+		North: "north",
+		East:  "east",
+		South: "south",
+		West:  "west",
+	}
+
+	animationTypes := map[AnimationType]string{
+		Idle: "idle",
+		Walk: "walk",
+	}
+
+	for direction, dirName := range directions {
+		game.playerImages[direction] = make(map[AnimationType][]*ebiten.Image)
+		for animType, animName := range animationTypes {
+			dirPath := filepath.Join("assets/sprites/player/base", animName, dirName)
+			frames, err := loadFrames(dirPath)
+			if err != nil {
+				log.Fatal(err)
+			}
+			game.playerImages[direction][animType] = frames
+		}
 	}
 
 	go game.listenToServer()
