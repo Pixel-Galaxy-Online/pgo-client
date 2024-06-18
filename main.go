@@ -16,6 +16,11 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 )
 
+const (
+	ScreenWidth  = 800
+	ScreenHeight = 600
+)
+
 type Direction int
 
 const (
@@ -109,10 +114,12 @@ func (g *Game) updateFrameIndex() {
 	frameCount := len(g.playerImages[g.direction][animationType])
 	if frameCount > 0 {
 		g.frameIndex = (g.frameIndex + 1) % frameCount
+	} else {
+		g.frameIndex = 0
 	}
 }
 
-func (g *Game) getCurrentFrame() *ebiten.Image {
+func (g *Game) getCurrentFrame() (*ebiten.Image, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	animationType := Idle
@@ -121,23 +128,28 @@ func (g *Game) getCurrentFrame() *ebiten.Image {
 	}
 	frames := g.playerImages[g.direction][animationType]
 	if len(frames) > 0 {
-		return frames[g.frameIndex]
+		if g.frameIndex < len(frames) {
+			return frames[g.frameIndex], nil
+		}
+		return nil, fmt.Errorf("frame index out of range")
 	}
-	return nil
+	return nil, fmt.Errorf("no frames available")
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
 	screen.Fill(color.RGBA{0, 0, 0, 255})
 
-	frame := g.getCurrentFrame()
-	if frame != nil {
+	frame, err := g.getCurrentFrame()
+	if err != nil {
+		log.Println("Error getting current frame:", err)
+	} else if frame != nil {
 		g.mu.Lock()
+		defer g.mu.Unlock()
 		for _, player := range g.players {
 			op := &ebiten.DrawImageOptions{}
 			op.GeoM.Translate(player.X, player.Y)
 			screen.DrawImage(frame, op)
 		}
-		g.mu.Unlock()
 	}
 
 	// Display coordinates in the top-left corner for the current client
@@ -148,7 +160,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeight int) {
-	return 800, 600
+	return ScreenWidth, ScreenHeight
 }
 
 func (g *Game) listenToServer() {
@@ -268,7 +280,7 @@ func main() {
 	go game.listenToServer()
 	go game.printCoordinates()
 
-	ebiten.SetWindowSize(800, 600)
+	ebiten.SetWindowSize(ScreenWidth, ScreenHeight)
 	ebiten.SetWindowTitle("MMO Client")
 	if err := ebiten.RunGame(game); err != nil {
 		log.Fatal(err)
