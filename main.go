@@ -1,9 +1,10 @@
 package main
 
 import (
-	"github.com/hajimehoshi/ebiten/v2"
 	"log"
 	"pixel-galaxy-client/game"
+
+	"github.com/hajimehoshi/ebiten/v2"
 )
 
 func main() {

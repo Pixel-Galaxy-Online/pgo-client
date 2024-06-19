@@ -60,27 +60,7 @@ func (g *Game) Update() error {
 	leftPressed := ebiten.IsKeyPressed(ebiten.KeyLeft)
 	rightPressed := ebiten.IsKeyPressed(ebiten.KeyRight)
 
-	if upPressed && rightPressed {
-		g.Conn.WriteJSON(Input{Type: "move_up", Amount: 2})
-		g.Conn.WriteJSON(Input{Type: "move_right", Amount: 2})
-		g.setDirection(East)
-		g.IsMoving = true
-	} else if upPressed && leftPressed {
-		g.Conn.WriteJSON(Input{Type: "move_up", Amount: 2})
-		g.Conn.WriteJSON(Input{Type: "move_left", Amount: 2})
-		g.setDirection(West)
-		g.IsMoving = true
-	} else if downPressed && rightPressed {
-		g.Conn.WriteJSON(Input{Type: "move_down", Amount: 2})
-		g.Conn.WriteJSON(Input{Type: "move_right", Amount: 2})
-		g.setDirection(East)
-		g.IsMoving = true
-	} else if downPressed && leftPressed {
-		g.Conn.WriteJSON(Input{Type: "move_down", Amount: 2})
-		g.Conn.WriteJSON(Input{Type: "move_left", Amount: 2})
-		g.setDirection(West)
-		g.IsMoving = true
-	} else if upPressed {
+	if upPressed {
 		g.Conn.WriteJSON(Input{Type: "move_up", Amount: 2})
 		g.setDirection(North)
 		g.IsMoving = true
