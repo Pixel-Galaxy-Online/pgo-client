@@ -109,11 +109,11 @@ func main() {
 	fmt.Println("Please close your browser and return to the game.")
 
 	// The rest of your game initialization
-	runGame()
+	runGame(username)
 }
 
 // runGame initializes and runs the game
-func runGame() {
+func runGame(username string) {
 	playerID := "PLAYER_ID"
 
 	conn, err := game.ConnectToServer(playerID)
@@ -129,6 +129,7 @@ func runGame() {
 		Conn:         conn,
 		Players:      make(map[string]game.Player),
 		ClientID:     clientID,
+		Username:     username, // Set the username here
 		PlayerImages: make(map[game.Direction]map[game.AnimationType][]*ebiten.Image),
 		AnimationSpeeds: map[game.AnimationType]int{
 			game.Idle: 30, // Idle animation speed
@@ -144,8 +145,10 @@ func runGame() {
 	go g.ListenToServer()
 	go g.PrintCoordinates()
 
-	ebiten.SetWindowSize(game.ScreenWidth, game.ScreenHeight)
+	ebiten.SetWindowSize(800, 600) // Default window size
 	ebiten.SetWindowTitle("MMO Client")
+	ebiten.SetWindowResizable(true)
+	ebiten.SetRunnableOnUnfocused(true) // Allow the game to run when the window is not focused
 	if err := ebiten.RunGame(g); err != nil {
 		log.Fatal(err)
 	}

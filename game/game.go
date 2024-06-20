@@ -1,6 +1,7 @@
 package game
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/gorilla/websocket"
 	"image/color"
@@ -10,14 +11,18 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
+	"github.com/hajimehoshi/ebiten/v2/text"
+	"golang.org/x/image/font/basicfont"
 )
 
 const (
-	ScreenWidth   = 800
-	ScreenHeight  = 600
-	debounceTime  = 200 * time.Millisecond // Debounce time for key press
-	maxChatLines  = 5                      // Maximum number of chat lines to display
-	maxMessageLen = 100                    // Maximum length of a chat message
+	ScreenWidth         = 800
+	ScreenHeight        = 600
+	debounceTime        = 200 * time.Millisecond // Debounce time for key press
+	maxChatLines        = 10                     // Maximum number of chat lines to display
+	maxMessageLen       = 100                    // Maximum length of a chat message
+	cursorBlinkInterval = 500 * time.Millisecond // Blink interval for cursor
+	scrollBarWidth      = 10                     // Width of the scroll bar
 )
 
 type Direction int
@@ -37,81 +42,158 @@ const (
 )
 
 type Game struct {
-	PlayerImages       map[Direction]map[AnimationType][]*ebiten.Image
-	Conn               *websocket.Conn
-	Players            map[string]Player
-	ClientID           string
-	FrameIndex         int
-	AnimationTick      int
-	AnimationSpeed     int
-	AnimationSpeeds    map[AnimationType]int // Animation speeds for different actions
-	mu                 sync.Mutex            // Mutex to protect shared assets
-	Direction          Direction
-	IsMoving           bool
-	IsMapEditorActive  bool      // State for map editor
-	IsInventoryActive  bool      // State for inventory UI
-	IsChatBoxActive    bool      // State for chat box UI
-	lastToggleTime     time.Time // Time of the last toggle
-	chatMessages       []string  // Chat messages
-	currentChatMessage string    // Current chat message being typed
+	PlayerImages         map[Direction]map[AnimationType][]*ebiten.Image
+	Conn                 *websocket.Conn
+	Players              map[string]Player
+	ClientID             string
+	FrameIndex           int
+	AnimationTick        int
+	AnimationSpeed       int
+	AnimationSpeeds      map[AnimationType]int // Animation speeds for different actions
+	mu                   sync.Mutex            // Mutex to protect shared assets
+	Direction            Direction
+	IsMoving             bool
+	IsMapEditorActive    bool      // State for map editor
+	IsInventoryActive    bool      // State for inventory UI
+	IsChatBoxActive      bool      // State for chat box UI
+	IsChatCursorActive   bool      // State for chat cursor focus
+	lastToggleTime       time.Time // Time of the last toggle
+	lastCursorBlink      time.Time // Time of the last cursor blink
+	cursorVisible        bool      // Cursor visibility state for blinking
+	chatMessages         []string  // Chat messages
+	currentChatMessage   string    // Current chat message being typed
+	Username             string    // Username of the current user
+	chatScrollOffset     int       // Scroll offset for chat messages
+	isDraggingScrollBar  bool      // State for scroll bar dragging
+	dragStartY           float64   // Y position where the drag started
+	originalScrollOffset int       // Scroll offset before dragging started
 }
 
 type Player struct {
 	ID string  `json:"id"`
 	X  float64 `json:"x"`
-	Y  float64 `json:"y"`
+	Y  float64 `json://y"`
+}
+
+type ChatMessage struct {
+	Username string `json:"username"`
+	Message  string `json:"message"`
 }
 
 func (g *Game) Update() error {
 	g.IsMoving = false
 
-	// Handle key presses for toggling UI elements with debouncing
 	now := time.Now()
-	if ebiten.IsKeyPressed(ebiten.KeyM) && now.Sub(g.lastToggleTime) > debounceTime {
-		g.IsMapEditorActive = !g.IsMapEditorActive
-		g.lastToggleTime = now
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyI) && now.Sub(g.lastToggleTime) > debounceTime {
-		g.IsInventoryActive = !g.IsInventoryActive
-		g.lastToggleTime = now
-	}
+	// Toggle chatbox visibility with Tab key
 	if ebiten.IsKeyPressed(ebiten.KeyTab) && now.Sub(g.lastToggleTime) > debounceTime {
 		g.IsChatBoxActive = !g.IsChatBoxActive
 		g.lastToggleTime = now
+		// If chatbox is being closed, also deactivate cursor
+		if !g.IsChatBoxActive {
+			g.IsChatCursorActive = false
+		}
 	}
 
-	// If the chatbox is active, handle text input
-	if g.IsChatBoxActive {
+	// Toggle chat cursor focus with Enter key when chatbox is visible
+	if g.IsChatBoxActive && ebiten.IsKeyPressed(ebiten.KeyEnter) && now.Sub(g.lastToggleTime) > debounceTime {
+		g.IsChatCursorActive = !g.IsChatCursorActive
+		g.lastToggleTime = now
+		// If chat cursor is deactivated, handle the chat message if there is one
+		if !g.IsChatCursorActive && len(g.currentChatMessage) > 0 {
+			chatMessage := ChatMessage{
+				Username: g.Username,
+				Message:  g.currentChatMessage,
+			}
+			log.Printf("Sending chat message: %s: %s", chatMessage.Username, chatMessage.Message)
+			g.Conn.WriteJSON(chatMessage)
+			g.chatMessages = append(g.chatMessages, fmt.Sprintf("%s: %s", chatMessage.Username, chatMessage.Message))
+			g.currentChatMessage = ""
+			// Scroll to the bottom when a new message is added
+			if len(g.chatMessages) > maxChatLines {
+				g.chatScrollOffset = len(g.chatMessages) - maxChatLines
+			} else {
+				g.chatScrollOffset = 0
+			}
+		}
+	}
+
+	// If chat cursor is active, handle chat input and cursor blinking
+	if g.IsChatCursorActive {
 		g.handleChatInput()
-		return nil
+		// Handle cursor blinking
+		if now.Sub(g.lastCursorBlink) >= cursorBlinkInterval {
+			g.cursorVisible = !g.cursorVisible
+			g.lastCursorBlink = now
+		}
 	}
 
-	// If any other UI is active, skip regular game updates
-	if g.IsMapEditorActive || g.IsInventoryActive {
-		return nil
+	// Handle key presses for toggling other UI elements with debouncing
+	if !g.IsChatCursorActive {
+		if ebiten.IsKeyPressed(ebiten.KeyM) && now.Sub(g.lastToggleTime) > debounceTime {
+			g.IsMapEditorActive = !g.IsMapEditorActive
+			g.lastToggleTime = now
+		}
+		if ebiten.IsKeyPressed(ebiten.KeyI) && now.Sub(g.lastToggleTime) > debounceTime {
+			g.IsInventoryActive = !g.IsInventoryActive
+			g.lastToggleTime = now
+		}
+
+		upPressed := ebiten.IsKeyPressed(ebiten.KeyUp)
+		downPressed := ebiten.IsKeyPressed(ebiten.KeyDown)
+		leftPressed := ebiten.IsKeyPressed(ebiten.KeyLeft)
+		rightPressed := ebiten.IsKeyPressed(ebiten.KeyRight)
+
+		if upPressed {
+			g.Conn.WriteJSON(Input{Type: "move_up", Amount: 2})
+			g.setDirection(North)
+			g.IsMoving = true
+		} else if downPressed {
+			g.Conn.WriteJSON(Input{Type: "move_down", Amount: 2})
+			g.setDirection(South)
+			g.IsMoving = true
+		} else if leftPressed {
+			g.Conn.WriteJSON(Input{Type: "move_left", Amount: 2})
+			g.setDirection(West)
+			g.IsMoving = true
+		} else if rightPressed {
+			g.Conn.WriteJSON(Input{Type: "move_right", Amount: 2})
+			g.setDirection(East)
+			g.IsMoving = true
+		}
 	}
 
-	upPressed := ebiten.IsKeyPressed(ebiten.KeyUp)
-	downPressed := ebiten.IsKeyPressed(ebiten.KeyDown)
-	leftPressed := ebiten.IsKeyPressed(ebiten.KeyLeft)
-	rightPressed := ebiten.IsKeyPressed(ebiten.KeyRight)
+	// Handle chat scrolling
+	if g.IsChatBoxActive {
+		// Handle scroll bar dragging
+		if g.isDraggingScrollBar {
+			if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
+				_, mouseY := ebiten.CursorPosition()
+				deltaY := float64(mouseY) - g.dragStartY
+				chatBoxHeight := 300.0 // Updated to fit 10 lines
+				maxScroll := float64(len(g.chatMessages) - maxChatLines)
+				newOffset := g.originalScrollOffset + int(deltaY*maxScroll/chatBoxHeight)
+				g.chatScrollOffset = clamp(newOffset, 0, len(g.chatMessages)-maxChatLines)
+			} else {
+				g.isDraggingScrollBar = false
+			}
+		} else if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
+			// Start dragging if the mouse is over the scroll bar
+			mouseX, mouseY := ebiten.CursorPosition()
+			chatBoxHeight := 300.0 // Updated to fit 10 lines
+			scrollBarHeight := chatBoxHeight * float64(maxChatLines) / float64(len(g.chatMessages))
+			scrollBarY := float64(ScreenHeight) - chatBoxHeight + (chatBoxHeight-scrollBarHeight)*float64(g.chatScrollOffset)/float64(len(g.chatMessages)-maxChatLines)
+			if float64(mouseX) >= ScreenWidth-scrollBarWidth && float64(mouseY) >= scrollBarY && float64(mouseY) <= scrollBarY+scrollBarHeight {
+				g.isDraggingScrollBar = true
+				g.dragStartY = float64(mouseY)
+				g.originalScrollOffset = g.chatScrollOffset
+			}
+		}
 
-	if upPressed {
-		g.Conn.WriteJSON(Input{Type: "move_up", Amount: 2})
-		g.setDirection(North)
-		g.IsMoving = true
-	} else if downPressed {
-		g.Conn.WriteJSON(Input{Type: "move_down", Amount: 2})
-		g.setDirection(South)
-		g.IsMoving = true
-	} else if leftPressed {
-		g.Conn.WriteJSON(Input{Type: "move_left", Amount: 2})
-		g.setDirection(West)
-		g.IsMoving = true
-	} else if rightPressed {
-		g.Conn.WriteJSON(Input{Type: "move_right", Amount: 2})
-		g.setDirection(East)
-		g.IsMoving = true
+		if ebiten.IsKeyPressed(ebiten.KeyPageUp) {
+			g.chatScrollOffset = max(0, g.chatScrollOffset-1)
+		} else if ebiten.IsKeyPressed(ebiten.KeyPageDown) {
+			g.chatScrollOffset = min(len(g.chatMessages)-maxChatLines, g.chatScrollOffset+1)
+		}
 	}
 
 	// Increment animation tick and update frame index based on animation speed
@@ -140,17 +222,6 @@ func (g *Game) handleChatInput() {
 	// Handle backspace
 	if ebiten.IsKeyPressed(ebiten.KeyBackspace) && len(g.currentChatMessage) > 0 {
 		g.currentChatMessage = g.currentChatMessage[:len(g.currentChatMessage)-1]
-	}
-
-	// Handle enter key to send the chat message
-	if ebiten.IsKeyPressed(ebiten.KeyEnter) {
-		if len(g.currentChatMessage) > 0 {
-			g.chatMessages = append(g.chatMessages, g.currentChatMessage)
-			if len(g.chatMessages) > maxChatLines {
-				g.chatMessages = g.chatMessages[1:] // Remove the oldest message if we exceed the max chat lines
-			}
-			g.currentChatMessage = ""
-		}
 	}
 }
 
@@ -245,20 +316,88 @@ func (g *Game) drawInventory(screen *ebiten.Image) {
 }
 
 func (g *Game) drawChatBox(screen *ebiten.Image) {
-	// Semi-transparent background for the chat box
-	chatBoxHeight := 100.0
-	chatBoxColor := color.RGBA{50, 50, 50, 150}
-	ebitenutil.DrawRect(screen, 0, ScreenHeight-chatBoxHeight, ScreenWidth, chatBoxHeight, chatBoxColor)
+	// Black, transparent background for the chat box
+	chatBoxHeight := 300.0 // Updated to fit 10 lines
+	chatBoxColor := color.RGBA{0, 0, 0, 180}
+	ebitenutil.DrawRect(screen, 0, float64(ScreenHeight)-chatBoxHeight, ScreenWidth, chatBoxHeight, chatBoxColor)
 
-	// Display chat messages
-	for i, msg := range g.chatMessages {
-		ebitenutil.DebugPrintAt(screen, msg, 10, int(ScreenHeight-chatBoxHeight)+10+i*20)
+	// Display chat messages with padding
+	padding := 10
+	lineHeight := 20
+	for i := 0; i < maxChatLines && i < len(g.chatMessages)-g.chatScrollOffset; i++ {
+		msg := g.chatMessages[g.chatScrollOffset+i]
+		ebitenutil.DebugPrintAt(screen, msg, padding, int(ScreenHeight-chatBoxHeight)+padding+i*lineHeight)
 	}
 
 	// Display current chat message being typed
-	ebitenutil.DebugPrintAt(screen, "> "+g.currentChatMessage, 10, int(ScreenHeight-chatBoxHeight)+10+len(g.chatMessages)*20)
+	ebitenutil.DebugPrintAt(screen, "> "+g.currentChatMessage, padding, int(ScreenHeight-chatBoxHeight)+padding+maxChatLines*lineHeight)
+
+	// Draw the blinking cursor if the chat cursor is active
+	if g.IsChatCursorActive && g.cursorVisible {
+		textBounds := text.BoundString(basicfont.Face7x13, g.currentChatMessage)
+		textWidth := textBounds.Max.X - textBounds.Min.X
+		cursorX := float64(padding) + float64(textWidth)
+		cursorY := float64(ScreenHeight) - chatBoxHeight + float64(padding) + float64(maxChatLines*lineHeight)
+		cursorHeight := float64(basicfont.Face7x13.Metrics().Height.Ceil())
+		ebitenutil.DrawRect(screen, cursorX, cursorY, 2, cursorHeight, color.White) // Draw cursor as a thin vertical line
+	}
+
+	// Draw the scroll bar
+	if len(g.chatMessages) > maxChatLines {
+		scrollBarHeight := chatBoxHeight * float64(maxChatLines) / float64(len(g.chatMessages))
+		scrollBarY := float64(ScreenHeight) - chatBoxHeight + (chatBoxHeight-scrollBarHeight)*float64(g.chatScrollOffset)/float64(len(g.chatMessages)-maxChatLines)
+		ebitenutil.DrawRect(screen, float64(ScreenWidth)-scrollBarWidth, scrollBarY, scrollBarWidth, scrollBarHeight, color.Gray{Y: 0x80})
+	}
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeight int) {
 	return ScreenWidth, ScreenHeight
+}
+
+func (g *Game) handleServerMessages() {
+	for {
+		_, message, err := g.Conn.ReadMessage()
+		if err != nil {
+			log.Println("Error reading message:", err)
+			return
+		}
+
+		var response map[string]string
+		if err := json.Unmarshal(message, &response); err != nil {
+			log.Println("Error unmarshalling response:", err)
+			continue
+		}
+
+		switch response["type"] {
+		case "login_success":
+			g.Username = response["username"]
+			log.Printf("Username set to: %s", g.Username)
+			// Handle other message types
+		}
+	}
+}
+
+// Helper functions for min and max
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func clamp(value, minValue, maxValue int) int {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
 }
