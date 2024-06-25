@@ -8,7 +8,6 @@ import (
 	"log"
 	"sync"
 	"time"
-
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/text"
