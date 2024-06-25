@@ -32,7 +32,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to get provider: %v", err)
 	}
-
 	config = oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
